@@ -13,11 +13,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from utils.data_loader import load_models
 from utils.classifier import build_features_from_form, classify_single_customer
+from utils.scoring import compute_premium_score
 
 
 # ---------------------------------------------------------------------------
@@ -36,23 +38,6 @@ models = load_models()
 
 COLOR_PROSPEROUS = "#1D9E75"
 COLOR_FAMILIES = "#BA7517"
-
-RECOMMENDATIONS = {
-    "Prosperous": (
-        "**Recommended actions:**\n"
-        "- Send a personalized Premium Club invitation with early access to limited-edition wines\n"
-        "- Invite to exclusive in-store events: wine tastings, food pairings, vineyard tours\n"
-        "- Promote bundled gourmet packages and higher-margin add-ons\n"
-        "- Add to the loyalty reward program with redeemable exclusive experiences"
-    ),
-    "Families": (
-        "**Recommended actions:**\n"
-        "- Add to the family-oriented newsletter with budget-friendly shopping tips\n"
-        "- Highlight bundle deals and larger discounts on bulk purchases\n"
-        "- Award loyalty points for frequent shopping\n"
-        "- Share recipe ideas and pairings suitable for family meals"
-    ),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -150,16 +135,22 @@ if submitted:
         features = build_features_from_form(form_data, models)
         result = classify_single_customer(features, models)
 
+        # Compute the premium score for this single customer
+        features_df = pd.DataFrame([features])
+        premium_score = float(compute_premium_score(features_df, models).iloc[0])
+
         st.divider()
         st.subheader("Classification result")
 
-        col_left, col_right = st.columns([1, 2])
+        # --- Top row: Cluster on the left, Score on the right ---
+        col_left, col_right = st.columns(2)
 
         with col_left:
+            st.markdown("**Customer segment**")
             label = result["cluster_label"]
-            color = COLOR_PROSPEROUS if label == "Prosperous" else COLOR_FAMILIES
+            cluster_color = COLOR_PROSPEROUS if label == "Prosperous" else COLOR_FAMILIES
             st.markdown(
-                f"<div style='background-color:{color}; "
+                f"<div style='background-color:{cluster_color}; "
                 f"padding: 20px; border-radius: 8px; text-align: center;'>"
                 f"<div style='font-size: 14px; color: white; opacity: 0.9;'>"
                 f"Assigned cluster</div>"
@@ -167,30 +158,93 @@ if submitted:
                 f"{label}</div></div>",
                 unsafe_allow_html=True,
             )
+            # Cluster confidence as small bar
+            probs = result["probabilities"]
+            st.caption(
+                f"Confidence: {label} {probs[label]:.0%}"
+            )
 
         with col_right:
-            st.markdown("**Confidence**")
-            probs = result["probabilities"]
-            fig = go.Figure(
-                data=[
-                    go.Bar(
-                        x=[probs["Prosperous"] * 100, probs["Families"] * 100],
-                        y=["Prosperous", "Families"],
-                        orientation="h",
-                        marker_color=[COLOR_PROSPEROUS, COLOR_FAMILIES],
-                        text=[
-                            f"{probs['Prosperous']:.1%}",
-                            f"{probs['Families']:.1%}",
-                        ],
-                        textposition="outside",
-                    )
-                ]
-            )
-            fig.update_layout(
-                height=160, margin=dict(t=10, b=20, l=10, r=10),
-                xaxis=dict(range=[0, 110], showticklabels=False),
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("**Premium-club readiness**")
+            # Color-code the score: red < 30, amber 30-60, green > 60
+            if premium_score >= 60:
+                score_color = "#1D9E75"   # green
+                score_band = "High"
+            elif premium_score >= 30:
+                score_color = "#E0A800"   # amber
+                score_band = "Medium"
+            else:
+                score_color = "#B84A4A"   # red
+                score_band = "Low"
 
-        st.markdown(RECOMMENDATIONS[label])
+            st.markdown(
+                f"<div style='background-color:{score_color}; "
+                f"padding: 20px; border-radius: 8px; text-align: center;'>"
+                f"<div style='font-size: 14px; color: white; opacity: 0.9;'>"
+                f"Predicted response probability ({score_band})</div>"
+                f"<div style='font-size: 32px; color: white; font-weight: 600;'>"
+                f"{premium_score:.1f} / 100</div></div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Score from the Random Forest model trained on historical "
+                "campaign response data."
+            )
+
+        # --- Combined recommendation ---
+        st.divider()
+        st.markdown("##### Recommended actions")
+
+        # Pick recommendation based on combination of cluster and score
+        if label == "Prosperous" and premium_score >= 60:
+            st.success(
+                "**High-priority premium-club target.** This customer profile "
+                "matches the Prosperous cluster *and* has a high predicted "
+                "response probability."
+            )
+            st.markdown(
+                "- Send a personalized Premium Club invitation **this week**\n"
+                "- Offer early access to a limited-edition wine batch\n"
+                "- Invite to the next VIP tasting or vineyard tour\n"
+                "- Assign to the loyalty reward program tier"
+            )
+        elif label == "Prosperous" and premium_score >= 30:
+            st.info(
+                "**Warm premium-club candidate.** Prosperous profile, "
+                "but moderate response probability - approach more carefully."
+            )
+            st.markdown(
+                "- Include in the next premium newsletter, not a hard sell yet\n"
+                "- Highlight bundled gourmet packages\n"
+                "- Track engagement before sending a Premium Club invite"
+            )
+        elif label == "Prosperous":
+            st.warning(
+                "**Prosperous profile but low response signal.** Worth "
+                "nurturing, but no aggressive outreach."
+            )
+            st.markdown(
+                "- Standard premium newsletter only\n"
+                "- Avoid pushy promotions - this customer is not engaging\n"
+                "- Re-evaluate score in 6 months"
+            )
+        elif label == "Families" and premium_score >= 60:
+            st.info(
+                "**Highly engaged Families customer.** Not a Premium Club "
+                "target, but a strong responder - great for family-oriented "
+                "campaigns."
+            )
+            st.markdown(
+                "- Feature in bundle-deal campaigns\n"
+                "- Send the family newsletter with recipe ideas\n"
+                "- Reward with loyalty points"
+            )
+        else:
+            st.markdown(
+                "**Families profile, low engagement.** Standard treatment."
+            )
+            st.markdown(
+                "- Add to general family newsletter\n"
+                "- Highlight discounts and bulk deals\n"
+                "- No targeted Premium outreach"
+            )
